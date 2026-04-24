@@ -1,27 +1,27 @@
-﻿import os
-import asyncio
+import os
 import json
 import sqlite3
+import asyncio
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
+from aiogram.utils import executor
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
 from starlette.responses import Response, PlainTextResponse
+from aiogram.dispatcher import Dispatcher as DP
+from aiogram.dispatcher.filters import Text
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.dispatcher import FSMContext
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import uvicorn
 
-# ========== КОНФИГ ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Токен подтянется из настроек Render
-ADMIN_IDS = [6141160793]  # ТВОЙ TELEGRAM ID (оставь как есть)
-PORT = int(os.environ.get("PORT", 8000))
-WEBHOOK_PATH = "/webhook"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_IDS = [6141160793]
 
-# ========== БАЗА ДАННЫХ ==========
+# ========== DATABASE ==========
 class Database:
     def __init__(self):
         self.conn = sqlite3.connect("sports_bot.db", check_same_thread=False)
@@ -131,199 +131,123 @@ class Database:
 
 db = Database()
 
-# ========== КЛАВИАТУРЫ ==========
-main_keyboard = types.ReplyKeyboardMarkup(
-    keyboard=[
-        [types.KeyboardButton(text="📋 Активные события")],
-        [types.KeyboardButton(text="🏆 Мой рейтинг"), types.KeyboardButton(text="📊 Таблица лидеров")]
-    ],
-    resize_keyboard=True
-)
+# ========== BOT INIT ==========
+storage = MemoryStorage()
+bot = Bot(token=BOT_TOKEN)
+dp = DP(bot, storage=storage)
 
-# ========== СОСТОЯНИЯ ДЛЯ АДМИНА ==========
-class AddEventStates(StatesGroup):
+main_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+main_keyboard.add("📋 Активные события")
+main_keyboard.add("🏆 Мой рейтинг", "📊 Таблица лидеров")
+
+class AddEvent(StatesGroup):
     title = State()
     description = State()
     options = State()
 
-# ========== ИНИЦИАЛИЗАЦИЯ БОТА ==========
-storage = MemoryStorage()
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=storage)
-
-# ========== ОБЩИЕ КОМАНДЫ ==========
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
     user = message.from_user
     db.register_user(user.id, user.username, user.full_name)
     await message.answer(
-        f"🏅 *Добро пожаловать в систему спортивных прогнозов, {user.full_name}!*\n\n"
-        f"📝 Делай прогнозы на спортивные события и получай баллы за правильные исходы!\n"
-        f"🎯 Каждый правильный прогноз приносит *10 баллов*",
-        parse_mode="Markdown",
+        f"🏅 Добро пожаловать, {user.full_name}!\nДелай прогнозы и получай баллы!",
         reply_markup=main_keyboard
     )
 
-@dp.message(lambda message: message.text == "📋 Активные события")
+@dp.message_handler(Text(equals="📋 Активные события"))
 async def show_events(message: types.Message):
     events = db.get_active_events()
     if not events:
-        await message.answer("😔 *Активных событий пока нет*", parse_mode="Markdown")
+        await message.answer("Нет активных событий")
         return
     for event in events:
         event_id, title, description, options_json, status, winner, created_at = event
-        options = json.loads(options_json)
-        buttons = [[InlineKeyboardButton(text=f"🔮 {opt}", callback_data=f"bet_{event_id}_{opt}")] for opt in options.keys()]
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await message.answer(
-            f"⚽️ *{title}*\n\n📝 {description}\n\n📊 *Варианты:* " + ", ".join(options.keys()),
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
+        opts = json.loads(options_json)
+        buttons = [[InlineKeyboardButton(opt, callback_data=f"bet_{event_id}_{opt}")] for opt in opts.keys()]
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer(f"⚽️ {title}\n{description}\nВарианты: {', '.join(opts.keys())}", reply_markup=kb)
 
-@dp.callback_query(lambda c: c.data.startswith("bet_"))
-async def place_bet(callback: types.CallbackQuery):
-    _, event_id_str, selected_option = callback.data.split("_", 2)
+@dp.callback_query_handler(lambda c: c.data.startswith("bet_"))
+async def place_bet_callback(callback: types.CallbackQuery):
+    _, event_id_str, option = callback.data.split("_", 2)
     event_id = int(event_id_str)
     user_id = callback.from_user.id
     event = db.get_event(event_id)
     if not event or event[4] != 'active':
-        await callback.answer("⏰ Событие завершено!", show_alert=True)
+        await callback.answer("Событие завершено!")
         return
     db.register_user(user_id, callback.from_user.username, callback.from_user.full_name)
-    success = db.place_bet(user_id, event_id, selected_option)
-    if success:
-        await callback.answer(f"✅ Прогноз принят: {selected_option}")
-        await callback.message.edit_reply_markup(reply_markup=None)
+    if db.place_bet(user_id, event_id, option):
+        await callback.answer(f"Прогноз принят: {option}")
+        await callback.message.edit_reply_markup()
     else:
-        await callback.answer("⚠️ Вы уже делали прогноз!", show_alert=True)
+        await callback.answer("Вы уже делали прогноз!")
 
-@dp.message(lambda message: message.text == "🏆 Мой рейтинг")
+@dp.message_handler(Text(equals="🏆 Мой рейтинг"))
 async def my_rating(message: types.Message):
     points = db.get_user_points(message.from_user.id)
     history = db.get_user_history(message.from_user.id)
-    text = f"📊 *Ваш счет: {points} баллов*\n\n📝 *История:*\n"
-    for title, option, is_win in history:
-        status = "✅ +10" if is_win else "⏳ ожидает"
-        text += f"• {title}: {option} — {status}\n"
-    await message.answer(text, parse_mode="Markdown")
+    text = f"Ваши баллы: {points}\n\nИстория:\n"
+    for title, opt, win in history:
+        text += f"{title}: {opt} - {'✅' if win else '⏳'}\n"
+    await message.answer(text)
 
-@dp.message(lambda message: message.text == "📊 Таблица лидеров")
+@dp.message_handler(Text(equals="📊 Таблица лидеров"))
 async def leaderboard(message: types.Message):
     leaders = db.get_leaderboard()
-    if not leaders:
-        await message.answer("🏆 Таблица лидеров пуста", parse_mode="Markdown")
-        return
-    text = "🏆 *ТАБЛИЦА ЛИДЕРОВ*\n\n"
-    for i, (full_name, username, points) in enumerate(leaders, 1):
-        name = full_name or username or f"Игрок {i}"
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "📌"
-        text += f"{medal} {i}. *{name}* — {points} баллов\n"
-    await message.answer(text, parse_mode="Markdown")
+    text = "🏆 ТОП-10:\n"
+    for i, (name, user, pts) in enumerate(leaders, 1):
+        text += f"{i}. {name or user} — {pts} баллов\n"
+    await message.answer(text)
 
-# ========== АДМИН-ПАНЕЛЬ ==========
-@dp.message(lambda message: message.text == "🔧 Админ-панель" and message.from_user.id in ADMIN_IDS)
+@dp.message_handler(Text(equals="🔧 Админ-панель"))
 async def admin_panel(message: types.Message):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить событие", callback_data="admin_add_event")],
-        [InlineKeyboardButton(text="📋 Управление событиями", callback_data="admin_manage_events")]
-    ])
-    await message.answer("🔧 *Админ-панель*", parse_mode="Markdown", reply_markup=keyboard)
+    if message.from_user.id in ADMIN_IDS:
+        await message.answer("Админ-панель\n/add_event - добавить событие")
 
-@dp.callback_query(lambda c: c.data == "admin_add_event" and c.from_user.id in ADMIN_IDS)
-async def admin_add_event_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.delete()
-    await callback.message.answer("📝 Введите *название* события:", parse_mode="Markdown")
-    await state.set_state(AddEventStates.title)
-    await callback.answer()
+@dp.message_handler(commands=['add_event'], state=None)
+async def add_event_start(message: types.Message):
+    if message.from_user.id in ADMIN_IDS:
+        await AddEvent.title.set()
+        await message.answer("Введите название события")
 
-@dp.message(AddEventStates.title)
+@dp.message_handler(state=AddEvent.title)
 async def add_event_title(message: types.Message, state: FSMContext):
     await state.update_data(title=message.text)
-    await message.answer("📝 Введите *описание*:", parse_mode="Markdown")
-    await state.set_state(AddEventStates.description)
+    await AddEvent.next()
+    await message.answer("Введите описание")
 
-@dp.message(AddEventStates.description)
-async def add_event_description(message: types.Message, state: FSMContext):
+@dp.message_handler(state=AddEvent.description)
+async def add_event_desc(message: types.Message, state: FSMContext):
     await state.update_data(description=message.text)
-    await message.answer("📝 Введите *варианты* через запятую\nПример: `Победа А, Ничья, Победа Б`", parse_mode="Markdown")
-    await state.set_state(AddEventStates.options)
+    await AddEvent.next()
+    await message.answer("Введите варианты через запятую (например: Победа А, Ничья, Победа Б)")
 
-@dp.message(AddEventStates.options)
-async def add_event_options(message: types.Message, state: FSMContext):
-    options_list = [opt.strip() for opt in message.text.split(",")]
-    if len(options_list) < 2:
-        await message.answer("❌ Нужно минимум 2 варианта!", parse_mode="Markdown")
-        return
-    options = {opt: 1.0 for opt in options_list}
+@dp.message_handler(state=AddEvent.options)
+async def add_event_opts(message: types.Message, state: FSMContext):
+    opts = [x.strip() for x in message.text.split(",")]
     data = await state.get_data()
-    db.add_event(data['title'], data['description'], json.dumps(options))
-    await message.answer(f"✅ Событие *{data['title']}* добавлено!", parse_mode="Markdown")
-    await state.clear()
+    db.add_event(data['title'], data['description'], json.dumps({opt: 1.0 for opt in opts}))
+    await message.answer(f"Событие '{data['title']}' добавлено!")
+    await state.finish()
 
-@dp.callback_query(lambda c: c.data == "admin_manage_events" and c.from_user.id in ADMIN_IDS)
-async def admin_manage_events(callback: types.CallbackQuery):
-    events = db.cursor.execute("SELECT * FROM events ORDER BY created_at DESC").fetchall()
-    for event in events:
-        event_id, title, description, options_json, status, winner, created_at = event
-        options = json.loads(options_json)
-        status_emoji = "🟢" if status == "active" else "🔴"
-        text = f"{status_emoji} *ID {event_id}: {title}*\n📊 Варианты: {', '.join(options.keys())}"
-        if status == "active":
-            buttons = [[InlineKeyboardButton(text="🏁 Завершить", callback_data=f"admin_finish_{event_id}")]]
-            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-            await callback.message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
-        else:
-            await callback.message.answer(f"{text}\n🏆 Победитель: {winner}", parse_mode="Markdown")
-    await callback.answer()
+async def on_startup(dp):
+    WEBHOOK_URL = f"{os.environ.get('RENDER_EXTERNAL_URL')}/webhook"
+    await bot.set_webhook(WEBHOOK_URL)
+    print(f"Webhook set to {WEBHOOK_URL}")
 
-@dp.callback_query(lambda c: c.data.startswith("admin_finish_") and c.from_user.id in ADMIN_IDS)
-async def admin_finish_prompt(callback: types.CallbackQuery):
-    event_id = int(callback.data.split("_")[2])
-    event = db.get_event(event_id)
-    options = json.loads(event[3])
-    buttons = [[InlineKeyboardButton(text=f"🏆 {opt}", callback_data=f"admin_winner_{event_id}_{opt}")] for opt in options.keys()]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.answer(f"Выберите победителя для *{event[1]}*:", parse_mode="Markdown", reply_markup=keyboard)
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data.startswith("admin_winner_") and c.from_user.id in ADMIN_IDS)
-async def admin_finish_event(callback: types.CallbackQuery):
-    _, _, event_id_str, winner = callback.data.split("_", 3)
-    event_id = int(event_id_str)
-    winners = db.finish_event(event_id, winner)
-    await callback.message.delete()
-    await callback.message.answer(f"✅ Событие завершено! Победитель: *{winner}*. Начислено баллов: {winners}", parse_mode="Markdown")
-    await callback.answer()
-
-# ========== ЗАПУСК С ВЕБ-ХУКОМ ДЛЯ RENDER ==========
-async def on_startup():
-    webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL')}{WEBHOOK_PATH}"
-    await bot.set_webhook(url=webhook_url, allowed_updates=types.Update.ALL_TYPES)
-    print(f"Webhook set to {webhook_url}")
-
-async def on_shutdown():
-    await bot.delete_webhook()
-    await bot.session.close()
-
-async def handle_webhook(request: Request) -> Response:
-    update = types.Update(**await request.json())
-    await dp.feed_update(bot, update)
-    return Response()
-
-# Starlette app
 app = Starlette(routes=[
-    Route(WEBHOOK_PATH, handle_webhook, methods=["POST"]),
-    Route("/health", lambda _: PlainTextResponse("OK"), methods=["GET"]),
+    Route("/webhook", lambda r: Response(), methods=["POST"]),
+    Route("/health", lambda r: PlainTextResponse("OK"), methods=["GET"]),
 ])
 
 @app.on_event("startup")
-async def startup_event():
-    await on_startup()
+async def startup():
+    await on_startup(dp)
 
 @app.on_event("shutdown")
-async def shutdown_event():
-    await on_shutdown()
+async def shutdown():
+    await bot.delete_webhook()
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
