@@ -11,7 +11,7 @@ from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.dispatcher import FSMContext
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
-BOT_TOKEN = "8769773881:AAEBc7dTnQV4itt2tjmoIjaFoI922V-LzT8"
+BOT_TOKEN = "8769773881:AAEBc7dTnQV4itt2tjmoIjaFOi922V-LzT8"
 ADMIN_IDS = [6141160793]
 
 db_conn = sqlite3.connect("sports_bot.db", check_same_thread=False)
