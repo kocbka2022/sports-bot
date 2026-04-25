@@ -358,8 +358,7 @@ async def miniapp(request: Request):
 @app.get("/api/events")
 async def get_events():
     events = get_active_events()
-    # Получаем user_id из параметров запроса
-    user_id = 1  # Временно
+    user_id = 1
     user_bets = get_user_bets_dict(user_id)
     return {
         "events": [{"id": e[0], "title": e[1], "description": e[2], "options": json.loads(e[3])} for e in events],
@@ -368,7 +367,7 @@ async def get_events():
 
 @app.get("/api/rating")
 async def get_rating():
-    user_id = 1  # Временно
+    user_id = 1
     return {
         "points": get_user_points(user_id),
         "history": get_user_history(user_id)
@@ -388,24 +387,29 @@ async def api_place_bet(request: Request):
     success = place_bet(user_id, event_id, option)
     return {"success": success, "error": None if success else "Уже делали прогноз"}
 
-def run_fastapi():
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+# ========== ЗАПУСК В ОДНОМ ПОТОКЕ ==========
+import asyncio
+import nest_asyncio
+
+# Применяем nest_asyncio для запуска нескольких event loop
+nest_asyncio.apply()
 
 def run_bot():
     """Запуск телеграм бота"""
-    try:
-        executor.start_polling(dp, skip_updates=True)
-    except Exception as e:
-        print(f"Ошибка бота: {e}")
+    print("🤖 Запуск Telegram бота...")
+    executor.start_polling(dp, skip_updates=True)
+
+def run_fastapi():
+    """Запуск FastAPI"""
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 if __name__ == "__main__":
-    # Запускаем бота в отдельном потоке
-    import threading
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    import multiprocessing
     
+    # Создаём отдельный процесс для бота
+    bot_process = multiprocessing.Process(target=run_bot)
+    bot_process.start()
     print("🚀 Бот спортивных прогнозов запущен!")
-    print(f"🌐 Mini App доступен по адресу: {RAILWAY_URL}/miniapp")
     
-    # Запускаем FastAPI в основном потоке
+    # Запускаем FastAPI в основном процессе
     run_fastapi()
