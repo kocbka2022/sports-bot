@@ -358,7 +358,8 @@ async def miniapp(request: Request):
 @app.get("/api/events")
 async def get_events():
     events = get_active_events()
-    user_id = 1
+    # Получаем user_id из параметров запроса
+    user_id = 1  # Временно
     user_bets = get_user_bets_dict(user_id)
     return {
         "events": [{"id": e[0], "title": e[1], "description": e[2], "options": json.loads(e[3])} for e in events],
@@ -367,8 +368,11 @@ async def get_events():
 
 @app.get("/api/rating")
 async def get_rating():
-    user_id = 1
-    return {"points": get_user_points(user_id), "history": get_user_history(user_id)}
+    user_id = 1  # Временно
+    return {
+        "points": get_user_points(user_id),
+        "history": get_user_history(user_id)
+    }
 
 @app.get("/api/leaders")
 async def get_leaders():
@@ -385,11 +389,23 @@ async def api_place_bet(request: Request):
     return {"success": success, "error": None if success else "Уже делали прогноз"}
 
 def run_fastapi():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
-# ========== ЗАПУСК ==========
+def run_bot():
+    """Запуск телеграм бота"""
+    try:
+        executor.start_polling(dp, skip_updates=True)
+    except Exception as e:
+        print(f"Ошибка бота: {e}")
+
 if __name__ == "__main__":
-    thread = Thread(target=run_fastapi, daemon=True)
-    thread.start()
-    print("🚀 Бот запущен!")
-    executor.start_polling(dp, skip_updates=True)
+    # Запускаем бота в отдельном потоке
+    import threading
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    print("🚀 Бот спортивных прогнозов запущен!")
+    print(f"🌐 Mini App доступен по адресу: {RAILWAY_URL}/miniapp")
+    
+    # Запускаем FastAPI в основном потоке
+    run_fastapi()
